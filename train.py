@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 
 def train_fn(model, dataset, epoch, model_path):
     optimizer = optim.Adam(
-        model.parameters(), lr=1e-4, weight_decay=1e-4
+        model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY
     )
     loss_fn = YoloLoss()
     scaler = torch.cuda.amp.GradScaler()
@@ -16,7 +16,7 @@ def train_fn(model, dataset, epoch, model_path):
         torch.tensor(ANCHORS)
         * torch.tensor(FEATURE_SIZE).unsqueeze(1).unsqueeze(1).repeat(1, 3, 2)
     ).to(DEVICE)
-    
+
     for i in range(epoch):
         train_loader = DataLoader(dataset, 16, shuffle=True)
         model.train()
@@ -54,4 +54,4 @@ if __name__ == "__main__":
     model = YoloNet(3, 120).to(DEVICE)
     dataset = YoloDataset(IMGS_PATH, ANNATATIONS_PATH, NAMES_FILE, 
                             IMG_SIZE, ANCHORS)
-    train_fn(model, dataset, 50, MODEL_PATH)
+    train_fn(model, dataset, 80, MODEL_PATH)

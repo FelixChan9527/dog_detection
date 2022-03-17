@@ -1,115 +1,74 @@
 import torch
 import torch.nn as nn
 
-def intersection_over_union(boxes_preds, boxes_labels, box_format="midpoint"):
-    """
-    Video explanation of this function:
-    https://youtu.be/XXYG5ZWtjj0
-
-    This function calculates intersection over union (iou) given pred boxes
-    and target boxes.
-
-    Parameters:
-        boxes_preds (tensor): Predictions of Bounding Boxes (BATCH_SIZE, 4)
-        boxes_labels (tensor): Correct labels of Bounding Boxes (BATCH_SIZE, 4)
-        box_format (str): midpoint/corners, if boxes (x,y,w,h) or (x1,y1,x2,y2)
-
-    Returns:
-        tensor: Intersection over union for all examples
-    """
-
-    if box_format == "midpoint":
-        box1_x1 = boxes_preds[..., 0:1] - boxes_preds[..., 2:3] / 2
-        box1_y1 = boxes_preds[..., 1:2] - boxes_preds[..., 3:4] / 2
-        box1_x2 = boxes_preds[..., 0:1] + boxes_preds[..., 2:3] / 2
-        box1_y2 = boxes_preds[..., 1:2] + boxes_preds[..., 3:4] / 2
-        box2_x1 = boxes_labels[..., 0:1] - boxes_labels[..., 2:3] / 2
-        box2_y1 = boxes_labels[..., 1:2] - boxes_labels[..., 3:4] / 2
-        box2_x2 = boxes_labels[..., 0:1] + boxes_labels[..., 2:3] / 2
-        box2_y2 = boxes_labels[..., 1:2] + boxes_labels[..., 3:4] / 2
-
-    if box_format == "corners":
-        box1_x1 = boxes_preds[..., 0:1]
-        box1_y1 = boxes_preds[..., 1:2]
-        box1_x2 = boxes_preds[..., 2:3]
-        box1_y2 = boxes_preds[..., 3:4]
-        box2_x1 = boxes_labels[..., 0:1]
-        box2_y1 = boxes_labels[..., 1:2]
-        box2_x2 = boxes_labels[..., 2:3]
-        box2_y2 = boxes_labels[..., 3:4]
-
-    x1 = torch.max(box1_x1, box2_x1)
-    y1 = torch.max(box1_y1, box2_y1)
-    x2 = torch.min(box1_x2, box2_x2)
-    y2 = torch.min(box1_y2, box2_y2)
-
-    intersection = (x2 - x1).clamp(0) * (y2 - y1).clamp(0)
-    box1_area = abs((box1_x2 - box1_x1) * (box1_y2 - box1_y1))
-    box2_area = abs((box2_x2 - box2_x1) * (box2_y2 - box2_y1))
-
-    return intersection / (box1_area + box2_area - intersection + 1e-6)
-
-
 class YoloLoss(nn.Module):
     def __init__(self):
         super().__init__()
-        self.mse = nn.MSELoss()
-        self.bce = nn.BCEWithLogitsLoss()
-        self.entropy = nn.CrossEntropyLoss()
-        self.sigmoid = nn.Sigmoid()
+        self.mse = nn.MSELoss()             # 均方误差损失函数
+        self.bce = nn.BCEWithLogitsLoss()   # 自带logic函数的二分类交叉熵损失函数
+        self.entropy = nn.CrossEntropyLoss()  # 交叉熵损失函数
+        self.sigmoid = nn.Sigmoid()         
 
         # 相关的倍增系数
         self.lambda_class = 1
         self.lambda_noobj = 10
         self.lambda_obj = 1
         self.lambda_box = 10
+    
+    def iou_count(self, y_pre, y):     # 用于计算存在物体的位置的预测box与实际的所有box之间的iou
+        xmin_ypre = y_pre[..., 0:1] - y_pre[..., 2:3] / 2
+        xmax_ypre = y_pre[..., 0:1] + y_pre[..., 2:3] / 2
+        ymin_ypre = y_pre[..., 1:2] - y_pre[..., 3:4] / 2
+        ymax_ypre = y_pre[..., 1:2] + y_pre[..., 3:4] / 2
 
-    def forward(self, predictions, target, anchors):
-        # 直接得到是否存在物体的掩膜（妙）
-        obj = target[..., 0] == 1       
-        noobj = target[..., 0] == 0
+        xmin_y = y[..., 0:1] - y[..., 2:3] / 2
+        xmax_y = y[..., 0:1] + y[..., 2:3] / 2
+        ymin_y = y[..., 1:2] - y[..., 3:4] / 2
+        ymax_y = y[..., 1:2] + y[..., 3:4] / 2
 
-        # 没有物体的损失
-        no_object_loss = self.bce(
-            (predictions[..., 0: 1][noobj]), (target[..., 0: 1][noobj]) 
-        )
+        x1 = torch.max(xmin_ypre, xmin_y)
+        y1 = torch.max(ymin_ypre, ymin_y)
+        x2 = torch.min(xmax_ypre, xmax_y)
+        y2 = torch.min(ymax_ypre, ymax_y)
 
-        # 存在物体的损失
-        # 这个就是用来计算pw*exp(tw)的pw（先验框），
-        # 这一步把某一尺度的三个anchor box变为与神经
-        # 网络输出相同维度数目的形状以便输出的每一个
-        # 网格的参数与之相乘
-        anchors = anchors.reshape(1, 3, 1, 1, 2)    
-        # 得到pw*exp(tw)后的值，其中x, y属于0~1, w, h可能大于1
-        box_preds = torch.cat([self.sigmoid(predictions[..., 1:3]), 
-                    torch.exp(predictions[..., 3:5] * anchors)], dim=-1)
-        # 计算对应位置的iou
-        # .detach()是为了保持其梯度，为了计算更加有保证，
-        # 去掉可能不一定会出现问题，此处作者也不敢确定
-        ious = intersection_over_union(box_preds[obj], target[..., 1:5][obj]).detach()
-        # 此处的target与iou相乘，即选取实际存在物体的预测框和
-        # 真实框之间的iou作为目标置信度，其中iou以及提前乘以obj
-        # 我觉得这个乘以target[..., 0:1]是多余的（@@@）
-        object_loss = self.bce((predictions[..., 0:1][obj]), 
-                                    (ious * target[..., 0:1][obj]))
-        
-        # 坐标的损失
-        predictions[..., 1:3] = self.sigmoid(predictions[..., 1:3]) # x, y
-        target[..., 3:5] = torch.log(
-            (1e-16 + target[..., 3:5] / anchors))   # 得到真实的tw, th
-        box_loss = self.mse(predictions[..., 1:5][obj], target[..., 1:5][obj])
+        i = (x2 - x1).clamp(0) * (y2 - y1).clamp(0)     # 使其限制在最小不小于0
+        s_ypre = abs((xmax_ypre - xmin_ypre) * (ymax_ypre - ymin_ypre))
+        s_y = abs((xmax_y - xmin_y) * (ymax_y - ymin_y))
 
-        # 种类损失
-        # 很奇怪，非得有5:
-        class_loss = self.entropy(
-            (predictions[..., 5:][obj]), (target[..., 5][obj].long()))
+        iou = i / (s_ypre+s_y-i+1e-6)       # 为了避免出现分母为0的情况，加上一个很小的数
+
+        return iou
+
+    def forward(self, y_pre, y, anchors):      # 此处计算的损失函数为某个尺度下的预测与实际标签之间的差值
+        obj = y[..., 0] == 1        # 直接取出标签中的位置来计算
+        noobj = y[..., 0] == 0
+
+        noobj_loss = self.bce(y_pre[..., 0:1][noobj], y[..., 0:1][noobj])   # 计算无物体损失
+
+        anchors = anchors.reshape(1, 3, 1, 1, 2)    # 设置成可以与标签或预测值相计算的形式
+        # 将预测的tx,ty经过sigmoid后变成网格偏移值，即与标签一样的值
+        # 即计算的是网格中的相对坐标（归一化），即x、y
+        xy_offset = self.sigmoid(y_pre[..., 1:3])  
+        # 这个wh是实际意义上的wh，即乘以图像宽高即为真实的wh
+        wh_box = torch.exp(y_pre[..., 3:5] * anchors)
+        box_ypre = torch.cat([xy_offset, wh_box], dim=-1)
+        box_y = y[..., 1: 5][obj]
+
+        iou = self.iou_count(box_ypre[obj], box_y).detach()     
+        # 计算每个存在物体的位置的iou，这个就是实际的物体存在置信度
+        obj_loss = self.bce(y_pre[..., 0:1][obj], iou*y[..., 0:1][obj])
+
+        y_pre[..., 1:3] = xy_offset     # x、y而不是tx、ty
+        y[..., 3:5] = torch.log((1e-16 + y[..., 3:5] / anchors))    # 实际的wh变为twth
+        xywh_loss = self.mse(y_pre[..., 1:5][obj], y[..., 1:5][obj])
+
+        # torch的交叉熵函数输入的预测值为onehot形式，标签为具体值（整数）
+        class_loss = self.entropy((y_pre[..., 5:][obj]), (y[..., 5][obj].long()))
+
+        loss = (self.lambda_obj * obj_loss +
+                self.lambda_noobj * noobj_loss +
+                self.lambda_box * xywh_loss +
+                self.lambda_class * class_loss)
         
-        # print(box_loss.item(), no_object_loss.item(), object_loss.item(), class_loss.item())
-        
-        return (
-            self.lambda_box * box_loss + 
-            self.lambda_noobj * no_object_loss +
-            self.lambda_obj * object_loss + 
-            self.lambda_class * class_loss
-            )
-        
+        return loss
+

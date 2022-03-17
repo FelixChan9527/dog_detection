@@ -12,3 +12,5 @@ ANCHORS = [
     [(0.02, 0.03), (0.04, 0.07), (0.08, 0.06)],
 ]  # Note these have been rescaled to be between [0, 1]
 FEATURE_SIZE = [13, 26, 52]
+LR = 1e-4
+WEIGHT_DECAY = 1e-4

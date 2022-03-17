@@ -96,15 +96,18 @@ def non_max_suppression(bboxes, iou_threshold, threshold, box_format="corners"):
     """
 
     assert type(bboxes) == list
-
-    bboxes = [box for box in bboxes if box[1] > threshold]
+    bboxes = [box for box in bboxes if box[1] > threshold]  # 仅保留置信度大于门限的
+    # 按照置信度大小，从小到大排序
     bboxes = sorted(bboxes, key=lambda x: x[1], reverse=True)
-    bboxes_after_nms = []
+    bboxes_after_nms = []   # 用于存储最终的box
 
-    while bboxes:
-        chosen_box = bboxes.pop(0)
+    while bboxes:                       # 只要bboxes中还有box，就一直执行
+        chosen_box = bboxes.pop(0)      # 取出置信度最大的一个
 
-        bboxes = [
+        # 循环挑出与chosen_box之间iou小于阈值的box进行保留，因为
+        # 二者的iou越小，就证明二者不是同一个物体阈值越小，所保留的box越少
+        # 这里作者对种类与chosen_box不一样的也保留了，因为有可能两类不一样
+        bboxes = [                      
             box
             for box in bboxes
             if box[0] != chosen_box[0]

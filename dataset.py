@@ -53,66 +53,79 @@ class YoloDataset(Dataset):
     def __len__(self):
         return len(self.imgs_annotations)
     
-    def size_trans(self, img, boxes_info, dog_class):
+    def img_trans(self, img):
+        '''
+        ### 用于图像的修整, 包括将图像修整为416*416、图像增强等
+        #### img: 输入图像
+        #### new_img: 输出图像处理后归一化并转为tensor的图像数据
+        #### dw、dh: 图像粘贴到416*416灰图中间的坐标
+        #### scale: 原始图与标准图之间尺寸变换的比例
+        '''
         long_side = max(img.size)                   # 获取长的边
         w, h = img.size
-        scale = self.input_size / long_side
-        w, h = int(w*scale), int(h*scale)
-        img2 = img.resize((w, h), Image.BICUBIC)
+        scale = self.input_size / long_side         # 得到
+        w, h = int(w*scale), int(h*scale)           # 宽高按比例缩放
+        img2 = img.resize((w, h), Image.BICUBIC)    
         dw, dh = (self.input_size - w), (self.input_size - h)       # 得到宽高的差值
-        new_img = Image.new('RGB', (self.input_size, self.input_size), (128,128,128))
-        new_img.paste(img2, (dw//2, dh//2))
-        new_img = np.array(new_img)
-        augmentations = self.transforms(image=new_img)
+        new_img = Image.new('RGB', (self.input_size, self.input_size), (128,128,128))   # 得到标准尺寸的灰图，用于加灰条
+        new_img.paste(img2, (dw//2, dh//2))         # 粘贴变换尺寸后的图到灰图上
+        new_img = np.array(new_img)                 # 图像增强需要以narray的格式输入
+        augmentations = self.transforms(image=new_img)  # 图像增强
         new_img = augmentations["image"]
+
+        return new_img, dw, dh, scale
+
+    def size_trans(self, img, boxes_info, dog_class):
+
+        new_img, dw, dh, scale = self.img_trans(img)
         targets = [torch.zeros((3, S, S, 6)) for S in self.FM_size]      
-        
+
         if len(boxes_info):     # 如果有ground true，则处理ground true坐标
-            np.random.shuffle(boxes_info)       # 随机打乱
+            np.random.shuffle(boxes_info)       # 随机打乱一个图的所有ground true
             for box_info in boxes_info:
                 gt_box = []
-                xmin, ymin, xmax, ymax = box_info * scale
-                xmin += dw//2
-                xmax += dw//2
-                ymin += dh//2
-                ymax += dh//2
-                gt_box.append(xmin)
-                gt_box.append(ymin)
-                gt_box.append(xmax)
-                gt_box.append(ymax)
+                box_info *= scale
+                box_info[0] += dw//2
+                box_info[2] += dw//2
+                box_info[1] += dh//2
+                box_info[3] += dh//2
+                gt_box.append(box_info[0])
+                gt_box.append(box_info[1])
+                gt_box.append(box_info[2])
+                gt_box.append(box_info[3])
                 gt_box.append(dog_class)
                 gt_box = np.array(gt_box, dtype=np.float32)
-                gt_box[0] = gt_box[0] / self.input_size   # x归一化
-                gt_box[2] = gt_box[2] / self.input_size   # x归一化
-                gt_box[1] = gt_box[1] / self.input_size   # y归一化
-                gt_box[3] = gt_box[3] / self.input_size   # y归一化
+                gt_box[0: 4] /= self.input_size
                 gt_box[2: 4] = gt_box[2: 4] - gt_box[0: 2]      # 得wh
                 gt_box[0: 2] = gt_box[0: 2] + gt_box[2: 4] / 2  # 得xy
                 
-                iou = self.iou(torch.tensor(gt_box[2: 4]), self.anchors)            # 计算与9个anchor的iou
+                iou = self.iou(torch.tensor(gt_box[2: 4]), self.anchors)    # 计算与9个anchor的iou
                 anchor_idxes = iou.argsort(descending=True, dim=0)    # 按iou从大到小排列anchors的索引
-                x, y, w, h, dog_class = gt_box    # 得到box的数据
+                x, y, w, h, dog_class = gt_box      # 得到box的数据
                 has_anchor = [False, False, False]
-            
+
                 for idx, anchor_idx in enumerate(anchor_idxes):     # 遍历所有的anchor，第一个一定为gt所在的位置  
                     
                     feature = anchor_idx // 3       # 得到对应的尺度位置
                     anchor = anchor_idx % 3         # 得到一个feature中anchor的位置
                     s = self.FM_size[feature]       # 得到对应feature map大小
                     i, j = int(s*y), int(s*x)       # 得到对应网格位置
-                    anchor_taken = targets[feature][anchor, i, j, 0]
 
                     # if idx == 0:                    # 即最大的iou为ground true所在的位置
-                    if not anchor_taken and not has_anchor[feature]:    
+                    if not has_anchor[feature]:    
                         gt_x, gt_y = s*x-j, s*y-i   # 小数部分即为偏移
                         gt_w, gt_h = s*w, s*h       # 变为对应尺度下的宽高
                         targets[feature][anchor, i, j, 0] = 1   # 存在ground true
                         targets[feature][anchor, i, j, 1:5] = torch.tensor([gt_x, gt_y, gt_w, gt_h])   # 赋值
                         targets[feature][anchor, i, j, 5] = torch.tensor(dog_class)
                     
-                    # elif iou[anchor_idx] > self.iou_thresh:     # 对应iou如果不是最大但大于门限值，则忽略
-                    elif not anchor_taken and iou[anchor_idx] > self.iou_thresh:    
+                    elif iou[anchor_idx] > self.iou_thresh: # iou大于门限但不是最大iou, 直接忽略
                         targets[feature][anchor, i, j, 0] = -1  # 直接令其为-1即可
+
+                    '''
+                    ### 此处的obj的位置的值只是一个标志
+                    ### 直接标志是否存在物体或者是否需要忽略
+                    '''
 
         return new_img, targets
     
