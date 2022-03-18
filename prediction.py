@@ -8,7 +8,6 @@ import numpy as np
 from model import *
 from dataset import *
 from torch.utils.data import DataLoader
-from utils import *
 import easy_read
 import time
 
